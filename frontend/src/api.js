@@ -21,10 +21,13 @@ export function fetchUploadedFiles() {
   return request('/files')
 }
 
-export function fetchRandomQuestion(sourceFile = 'all') {
-  const query = sourceFile && sourceFile !== 'all'
-    ? `?source_file=${encodeURIComponent(sourceFile)}`
-    : ''
+export function fetchRandomQuestion({ scopeType = 'all', sourceFile = 'all' } = {}) {
+  const params = new URLSearchParams()
+  params.set('scope_type', scopeType)
+  if (scopeType === 'source_file' && sourceFile && sourceFile !== 'all') {
+    params.set('source_file', sourceFile)
+  }
+  const query = params.toString() ? `?${params.toString()}` : ''
   return request(`/question/random${query}`)
 }
 
@@ -52,6 +55,21 @@ export function updateWrongQuestionState(questionId, payload) {
     method: 'PATCH',
     body: JSON.stringify(payload),
   })
+}
+
+export function deleteQuestion(questionId) {
+  return request(`/question/${questionId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function fetchPracticeRecords(sourceFile = 'all') {
+  const params = new URLSearchParams()
+  if (sourceFile && sourceFile !== 'all') {
+    params.set('source_file', sourceFile)
+  }
+  const query = params.toString() ? `?${params.toString()}` : ''
+  return request(`/history/practice-records${query}`)
 }
 
 export function importPdfs(files, { onProgress } = {}) {

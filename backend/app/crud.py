@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 
 from sqlalchemy import func, select
@@ -14,9 +14,27 @@ def get_question_count(db: Session) -> int:
     return db.scalar(select(func.count()).select_from(Question)) or 0
 
 
-def get_random_question(db: Session, source_file: str | None = None) -> Question | None:
+def get_question_attempt_count(db: Session, question_id: str) -> int:
+    return db.scalar(select(func.count()).select_from(AnswerAttempt).where(AnswerAttempt.question_id == question_id)) or 0
+
+
+def get_random_question(
+    db: Session,
+    source_file: str | None = None,
+    *,
+    scope_type: str = "all",
+) -> Question | None:
     stmt = select(Question).options(selectinload(Question.options), selectinload(Question.user_state))
-    if source_file:
+    if scope_type == "source_file":
+        if not source_file:
+            return None
+        stmt = stmt.where(Question.source_file == source_file)
+    elif scope_type == "wrong_only":
+        wrong_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(False)).distinct()
+        stmt = stmt.where(Question.id.in_(wrong_question_ids)).where(
+            (Question.user_state == None) | (Question.user_state.has(hidden_from_wrong_history=False))
+        )
+    elif source_file:
         stmt = stmt.where(Question.source_file == source_file)
     stmt = stmt.order_by(func.random()).limit(1)
     return db.scalar(stmt)
@@ -31,7 +49,7 @@ def get_question_by_id(db: Session, question_id: str) -> Question | None:
     return db.scalar(stmt)
 
 
-def serialize_question(question: Question) -> dict[str, object]:
+def serialize_question(question: Question, *, attempt_count: int = 0) -> dict[str, object]:
     return {
         "id": question.id,
         "question_number": question.question_number,
@@ -42,6 +60,7 @@ def serialize_question(question: Question) -> dict[str, object]:
         "year": question.year,
         "source_file": question.source_file,
         "is_favorite": bool(question.user_state.is_favorite) if question.user_state else False,
+        "attempt_count": attempt_count,
     }
 
 
@@ -221,6 +240,15 @@ def update_question_user_state(
     return state
 
 
+def delete_question(db: Session, question_id: str) -> bool:
+    question = db.get(Question, question_id)
+    if question is None:
+        return False
+    db.delete(question)
+    db.commit()
+    return True
+
+
 def create_answer_attempt(
     db: Session,
     *,
@@ -305,8 +333,67 @@ def list_wrong_answer_history(
                 "selected_answer": attempt.selected_answer,
                 "correct_answer": attempt.correct_answer,
                 "answered_at": attempt.answered_at,
+                "options": [{"label": option.label, "content": option.content} for option in question.options],
+                "explanation": question.explanation,
+                "attempt_count": get_question_attempt_count(db, question.id),
                 "is_favorite": is_favorite,
                 "hidden_from_wrong_history": is_hidden,
             }
         )
     return result
+
+
+def list_practice_record_buckets(db: Session, source_file: str | None = None) -> list[dict[str, object]]:
+    backfill_uploaded_files(db)
+    stmt = (
+        select(AnswerAttempt)
+        .options(selectinload(AnswerAttempt.question))
+        .order_by(AnswerAttempt.answered_at.desc())
+    )
+    if source_file:
+        stmt = stmt.where(AnswerAttempt.source_file == source_file)
+    attempts = db.scalars(stmt).all()
+    file_name_map = {
+        item[0]: item[1]
+        for item in db.execute(select(UploadedFile.source_file, UploadedFile.file_name)).all()
+    }
+
+    buckets: dict[datetime, dict[str, object]] = {}
+    ordered_keys: list[datetime] = []
+    for attempt in attempts:
+        question = attempt.question
+        if question is None:
+            continue
+        bucket_start = attempt.answered_at.replace(second=0, microsecond=0)
+        if bucket_start not in buckets:
+            buckets[bucket_start] = {
+                "bucket_start": bucket_start,
+                "bucket_end": bucket_start + timedelta(minutes=1),
+                "attempt_count": 0,
+                "correct_count": 0,
+                "wrong_count": 0,
+                "items": [],
+            }
+            ordered_keys.append(bucket_start)
+        bucket = buckets[bucket_start]
+        bucket["attempt_count"] += 1
+        if attempt.is_correct:
+            bucket["correct_count"] += 1
+        else:
+            bucket["wrong_count"] += 1
+        bucket["items"].append(
+            {
+                "attempt_id": attempt.id,
+                "question_id": attempt.question_id,
+                "source_file": attempt.source_file,
+                "file_name": display_file_name(attempt.source_file, file_name_map),
+                "question_number": question.question_number,
+                "stem": question.stem,
+                "selected_answer": attempt.selected_answer,
+                "correct_answer": attempt.correct_answer,
+                "is_correct": attempt.is_correct,
+                "answered_at": attempt.answered_at,
+            }
+        )
+
+    return [buckets[key] for key in ordered_keys]

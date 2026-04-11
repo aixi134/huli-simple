@@ -59,6 +59,14 @@ img {
   margin-bottom: 24px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .header h1 {
   margin: 0 0 8px;
 }
@@ -66,6 +74,13 @@ img {
 .header p {
   margin: 0;
   color: #5b6576;
+}
+
+.session-progress {
+  margin-top: 8px;
+  color: #2563eb;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .card {
@@ -411,7 +426,8 @@ img {
   align-items: flex-start;
 }
 
-.history-tabs {
+.history-tabs,
+.view-tabs {
   display: inline-flex;
   gap: 8px;
   background: #eef2ff;
@@ -557,6 +573,49 @@ img {
   margin: 6px 0 0;
 }
 
+.history-option-list,
+.record-bucket-list,
+.record-bucket-entries {
+  display: grid;
+  gap: 10px;
+}
+
+.history-option-list {
+  margin-top: 12px;
+}
+
+.history-option-item,
+.record-entry-item,
+.record-bucket-item {
+  border: 1px solid #d5ddeb;
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.history-option-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.history-ai-button {
+  margin-top: 12px;
+}
+
+.record-bucket-header,
+.record-entry-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.record-bucket-header span {
+  color: #5b6576;
+  font-size: 14px;
+}
+
 .meta {
   display: flex;
   flex-wrap: wrap;
@@ -636,6 +695,14 @@ img {
   justify-content: flex-end;
 }
 
+.question-navigation-actions {
+  justify-content: space-between;
+}
+
+.question-card {
+  touch-action: pan-y;
+}
+
 .result-badge {
   display: inline-block;
   padding: 6px 12px;
@@ -712,7 +779,9 @@ img {
   .file-item,
   .history-top,
   .history-row,
-  .library-toolbar {
+  .library-toolbar,
+  .record-entry-item,
+  .record-bucket-header {
     flex-direction: column;
     align-items: stretch;
   }
@@ -725,6 +794,7 @@ img {
     font-size: 19px;
   }
 
+  .session-progress,
   .tap-hint,
   .section-subtitle,
   .upload-help,
@@ -761,15 +831,18 @@ img {
   .history-actions-inline,
   .file-stats,
   .history-tabs,
+  .view-tabs,
   .selected-file-list,
   .library-toolbar-actions,
   .scope-selector-bar,
   .scope-select,
-  .selected-scope-summary {
+  .selected-scope-summary,
+  .header-actions {
     width: 100%;
   }
 
-  .history-tabs {
+  .history-tabs,
+  .view-tabs {
     display: grid;
     grid-template-columns: 1fr 1fr;
   }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -43,15 +45,20 @@ def list_files(db: Session = Depends(get_db)) -> list[schemas.UploadedFileOut]:
 @app.get("/question/random", response_model=schemas.QuestionOut)
 def get_random_question(
     source_file: str | None = Query(default=None),
+    scope_type: Literal["all", "source_file", "wrong_only"] = Query(default="all"),
     db: Session = Depends(get_db),
 ) -> schemas.QuestionOut:
     normalized_source = None if not source_file or source_file == "all" else source_file
-    question = crud.get_random_question(db, source_file=normalized_source)
+    question = crud.get_random_question(db, source_file=normalized_source, scope_type=scope_type)
     if question is None:
+        if scope_type == "wrong_only":
+            raise HTTPException(status_code=404, detail="错题库为空，请先做错几题")
+        if scope_type == "source_file" and normalized_source:
+            raise HTTPException(status_code=404, detail="该文件下暂无题目，请重新选择")
         if normalized_source:
             raise HTTPException(status_code=404, detail="该文件下暂无题目，请重新选择")
         raise HTTPException(status_code=404, detail="题库为空，请先导入题目")
-    return schemas.QuestionOut(**crud.serialize_question(question))
+    return schemas.QuestionOut(**crud.serialize_question(question, attempt_count=crud.get_question_attempt_count(db, question.id)))
 
 
 @app.post("/answer", response_model=schemas.SubmitAnswerOut)
@@ -73,6 +80,7 @@ def submit_answer(payload: schemas.SubmitAnswerIn, db: Session = Depends(get_db)
         correct=is_correct,
         answer=correct_answer,
         explanation=question.explanation,
+        attempt_count=crud.get_question_attempt_count(db, question.id),
     )
 
 
@@ -125,6 +133,26 @@ def wrong_answer_history(
     return [
         schemas.WrongAnswerHistoryItemOut(**item)
         for item in crud.list_wrong_answer_history(db, normalized_source, favorites_only=favorites_only)
+    ]
+
+
+@app.delete("/question/{question_id}", response_model=schemas.QuestionDeleteOut)
+def delete_question(question_id: str, db: Session = Depends(get_db)) -> schemas.QuestionDeleteOut:
+    deleted = crud.delete_question(db, question_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="题目不存在")
+    return schemas.QuestionDeleteOut(question_id=question_id, deleted=True)
+
+
+@app.get("/history/practice-records", response_model=list[schemas.PracticeRecordBucketOut])
+def practice_records(
+    source_file: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[schemas.PracticeRecordBucketOut]:
+    normalized_source = None if not source_file or source_file == "all" else source_file
+    return [
+        schemas.PracticeRecordBucketOut(**item)
+        for item in crud.list_practice_record_buckets(db, normalized_source)
     ]
 
 

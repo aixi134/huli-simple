@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
+  deleteQuestion,
+  fetchPracticeRecords,
   fetchRandomQuestion,
   fetchUploadedFiles,
   fetchWrongAnswerHistory,
@@ -61,6 +64,16 @@ function getUploadStageText(stage) {
   return ''
 }
 
+function getScopeQuery(scopeType, sourceFile) {
+  if (scopeType === 'wrong_only') {
+    return { scopeType: 'wrong_only' }
+  }
+  if (scopeType === 'source_file' && sourceFile && sourceFile !== 'all') {
+    return { scopeType: 'source_file', sourceFile }
+  }
+  return { scopeType: 'all' }
+}
+
 export default function App() {
   const [question, setQuestion] = useState(null)
   const [selectedAnswer, setSelectedAnswer] = useState('')
@@ -75,35 +88,63 @@ export default function App() {
   const [selectedFiles, setSelectedFiles] = useState([])
   const [importResult, setImportResult] = useState(null)
   const [uploadedFiles, setUploadedFiles] = useState([])
+  const [scopeType, setScopeType] = useState('all')
   const [selectedSourceFile, setSelectedSourceFile] = useState('all')
+  const [activeView, setActiveView] = useState('quiz')
   const [wrongHistory, setWrongHistory] = useState([])
   const [historyTab, setHistoryTab] = useState('wrong')
   const [expandedQuestionIds, setExpandedQuestionIds] = useState([])
   const [loadingFiles, setLoadingFiles] = useState(true)
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [historyActionQuestionId, setHistoryActionQuestionId] = useState('')
+  const [historyAIByQuestionId, setHistoryAIByQuestionId] = useState({})
+  const [historyAILoadingId, setHistoryAILoadingId] = useState('')
+  const [recordBuckets, setRecordBuckets] = useState([])
+  const [loadingRecords, setLoadingRecords] = useState(true)
+  const [deletingQuestion, setDeletingQuestion] = useState(false)
   const [libraryPanelOpen, setLibraryPanelOpen] = useState(false)
+  const [questionHistory, setQuestionHistory] = useState([])
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(-1)
   const [initialized, setInitialized] = useState(false)
   const [error, setError] = useState('')
   const aiAbortRef = useRef(null)
   const uploadInputRef = useRef(null)
   const submitLockRef = useRef(false)
+  const questionHistoryRef = useRef([])
+  const currentQuestionIndexRef = useRef(-1)
 
   const sourceLabelMap = useMemo(() => {
     const pairs = uploadedFiles.map((item) => [item.source_file, item.file_name])
     return Object.fromEntries(pairs)
   }, [uploadedFiles])
 
+  useEffect(() => {
+    questionHistoryRef.current = questionHistory
+  }, [questionHistory])
+
+  useEffect(() => {
+    currentQuestionIndexRef.current = currentQuestionIndex
+  }, [currentQuestionIndex])
+
   const currentSourceLabel = question ? (sourceLabelMap[question.source_file] || question.source_file) : ''
   const historyTitle = historyTab === 'wrong' ? '错题' : '收藏'
   const selectedFileCountText = selectedFiles.length ? `已选择 ${selectedFiles.length} 个文件` : ''
-  const currentScopeLabel = selectedSourceFile === 'all'
-    ? '全部题库'
-    : (sourceLabelMap[selectedSourceFile] || '当前文件')
+  const canGoPreviousQuestion = currentQuestionIndex > 0
+  const canGoNextQuestion = currentQuestionIndex >= 0 && currentQuestionIndex < questionHistory.length - 1
+  const canSwipePrevious = canGoPreviousQuestion && !loadingQuestion && !submitting
+  const canSwipeNext = !loadingQuestion && !submitting
+  const questionProgressText = currentQuestionIndex >= 0 ? `本轮第 ${currentQuestionIndex + 1} / ${questionHistory.length} 题` : ''
+  const currentScopeLabel = scopeType === 'wrong_only'
+    ? '错题库'
+    : scopeType === 'source_file'
+      ? (selectedSourceFile !== 'all' ? (sourceLabelMap[selectedSourceFile] || '当前文件') : '未选择文件')
+      : '全部题库'
   const selectedFileInfo = uploadedFiles.find((item) => item.source_file === selectedSourceFile) || null
   const displayHistory = historyTab === 'favorites'
     ? wrongHistory
     : wrongHistory.filter((item) => !item.hidden_from_wrong_history)
+  const currentScopeQuery = getScopeQuery(scopeType, selectedSourceFile)
+  const recordsSourceFile = scopeType === 'source_file' ? selectedSourceFile : 'all'
 
   async function refreshUploadedFiles() {
     setLoadingFiles(true)
@@ -129,36 +170,91 @@ export default function App() {
     }
   }
 
-  async function loadQuestion(sourceFile = selectedSourceFile) {
+  async function refreshPracticeRecords(sourceFile = recordsSourceFile) {
+    setLoadingRecords(true)
+    try {
+      const records = await fetchPracticeRecords(sourceFile)
+      setRecordBuckets(records)
+    } finally {
+      setLoadingRecords(false)
+    }
+  }
+
+  function resetQuestionView() {
     if (aiAbortRef.current) {
       aiAbortRef.current.abort()
       aiAbortRef.current = null
     }
-    setLoadingQuestion(true)
     submitLockRef.current = false
     setError('')
     setSelectedAnswer('')
     setResult(null)
     setAIExplanation('')
+  }
+
+  function applyQuestion(data) {
+    resetQuestionView()
+    setQuestion(data)
+  }
+
+  async function loadQuestion(scope = currentScopeQuery, options = {}) {
+    const { appendHistory = true, resetHistory = false } = options
+    setLoadingQuestion(true)
+    resetQuestionView()
     try {
-      const data = await fetchRandomQuestion(sourceFile)
+      const data = await fetchRandomQuestion(scope)
       setQuestion(data)
+      if (resetHistory) {
+        setQuestionHistory([data])
+        setCurrentQuestionIndex(0)
+      } else if (appendHistory) {
+        const baseIndex = currentQuestionIndexRef.current
+        const nextHistory = questionHistoryRef.current.slice(0, baseIndex + 1)
+        nextHistory.push(data)
+        setQuestionHistory(nextHistory)
+        setCurrentQuestionIndex(nextHistory.length - 1)
+      }
     } catch (err) {
       setError(err.message)
       setQuestion(null)
+      if (resetHistory) {
+        setQuestionHistory([])
+        setCurrentQuestionIndex(-1)
+      }
     } finally {
       setLoadingQuestion(false)
     }
   }
 
+  function showQuestionFromHistory(index) {
+    const target = questionHistoryRef.current[index]
+    if (!target) {
+      return
+    }
+    setLoadingQuestion(false)
+    setCurrentQuestionIndex(index)
+    applyQuestion(target)
+  }
+
+  function handlePreviousQuestion() {
+    if (!canGoPreviousQuestion) {
+      return
+    }
+    showQuestionFromHistory(currentQuestionIndex - 1)
+  }
+
+  async function handleNextQuestion() {
+    if (canGoNextQuestion) {
+      showQuestionFromHistory(currentQuestionIndex + 1)
+      return
+    }
+    await loadQuestion(currentScopeQuery)
+  }
+
   useEffect(() => {
     async function bootstrap() {
       try {
-        await Promise.all([
-          refreshUploadedFiles(),
-          refreshWrongHistory('all', 'wrong'),
-          loadQuestion('all'),
-        ])
+        await refreshUploadedFiles()
       } catch (err) {
         setError(err.message)
       } finally {
@@ -179,15 +275,16 @@ export default function App() {
     if (!initialized) {
       return
     }
-    loadQuestion(selectedSourceFile).catch((err) => setError(err.message))
-  }, [initialized, selectedSourceFile])
+    loadQuestion(currentScopeQuery, { resetHistory: true }).catch((err) => setError(err.message))
+  }, [initialized, scopeType, selectedSourceFile])
 
   useEffect(() => {
     if (!initialized) {
       return
     }
     refreshWrongHistory(selectedSourceFile, historyTab).catch((err) => setError(err.message))
-  }, [initialized, selectedSourceFile, historyTab])
+    refreshPracticeRecords(recordsSourceFile).catch((err) => setError(err.message))
+  }, [initialized, selectedSourceFile, historyTab, scopeType])
 
   async function handleSubmit(answerToSubmit = selectedAnswer) {
     if (!question || !answerToSubmit || submitLockRef.current || result) {
@@ -199,6 +296,12 @@ export default function App() {
     setSelectedAnswer(answerToSubmit)
     try {
       const data = await submitAnswer(question.id, answerToSubmit)
+      setQuestion((current) => (current ? { ...current, attempt_count: data.attempt_count } : current))
+      await refreshPracticeRecords(recordsSourceFile)
+      if (data.correct) {
+        await handleNextQuestion()
+        return
+      }
       setResult(data)
       await refreshWrongHistory(selectedSourceFile, historyTab)
     } catch (err) {
@@ -270,8 +373,9 @@ export default function App() {
       }
       await refreshUploadedFiles()
       await refreshWrongHistory(selectedSourceFile, historyTab)
+      await refreshPracticeRecords(recordsSourceFile)
       if (!question) {
-        await loadQuestion(selectedSourceFile)
+        await loadQuestion(currentScopeQuery)
       }
       setUploadStage('done')
     } catch (err) {
@@ -315,6 +419,74 @@ export default function App() {
     }
   }
 
+  async function handleDeleteCurrentQuestion() {
+    if (!question || deletingQuestion) {
+      return
+    }
+    const confirmed = window.confirm('确认从题库删除当前题目吗？删除后将同时移除作答记录和错题记录。')
+    if (!confirmed) {
+      return
+    }
+    setDeletingQuestion(true)
+    setError('')
+    try {
+      await deleteQuestion(question.id)
+      const nextHistory = questionHistoryRef.current.filter((item) => item.id !== question.id)
+      setQuestionHistory(nextHistory)
+      setCurrentQuestionIndex(-1)
+      setQuestion(null)
+      setResult(null)
+      setAIExplanation('')
+      setWrongHistory((current) => current.filter((item) => item.question_id !== question.id))
+      setExpandedQuestionIds((current) => current.filter((id) => id !== question.id))
+      setHistoryAIByQuestionId((current) => {
+        const next = { ...current }
+        delete next[question.id]
+        return next
+      })
+      await refreshUploadedFiles()
+      await refreshWrongHistory(selectedSourceFile, historyTab)
+      await refreshPracticeRecords(recordsSourceFile)
+      await loadQuestion(currentScopeQuery, { resetHistory: true })
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDeletingQuestion(false)
+    }
+  }
+
+  async function handleHistoryAIExplanation(questionId) {
+    if (!questionId || historyAILoadingId === questionId || historyAIByQuestionId[questionId]) {
+      return
+    }
+    if (aiAbortRef.current) {
+      aiAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    aiAbortRef.current = controller
+    setHistoryAILoadingId(questionId)
+    setError('')
+    try {
+      let content = ''
+      await streamAIExplanation(questionId, {
+        signal: controller.signal,
+        onChunk: (chunk) => {
+          content += chunk
+          setHistoryAIByQuestionId((current) => ({ ...current, [questionId]: content }))
+        },
+      })
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setError(err.message)
+      }
+    } finally {
+      if (aiAbortRef.current === controller) {
+        aiAbortRef.current = null
+      }
+      setHistoryAILoadingId('')
+    }
+  }
+
   function toggleExpandedQuestion(questionId) {
     setExpandedQuestionIds((current) => (
       current.includes(questionId)
@@ -330,10 +502,21 @@ export default function App() {
           <div>
             <h1>护理刷题系统</h1>
             <p>支持多文件导入、按文件练题、错题收藏与紧凑错题管理</p>
+            {questionProgressText ? <p className="session-progress">{questionProgressText}</p> : null}
           </div>
-          <button type="button" className="secondary-button" onClick={() => loadQuestion()} disabled={loadingQuestion}>
-            {loadingQuestion ? '加载中...' : '换一题'}
-          </button>
+          <div className="header-actions">
+            <div className="view-tabs">
+              <button type="button" className={`tab-button ${activeView === 'quiz' ? 'active' : ''}`} onClick={() => setActiveView('quiz')}>
+                刷题
+              </button>
+              <button type="button" className={`tab-button ${activeView === 'records' ? 'active' : ''}`} onClick={() => setActiveView('records')}>
+                练习记录
+              </button>
+            </div>
+            <button type="button" className="secondary-button" onClick={() => handleNextQuestion()} disabled={loadingQuestion || submitting}>
+              {loadingQuestion ? '加载中...' : '换一题'}
+            </button>
+          </div>
         </header>
 
         <section className="card library-card">
@@ -358,34 +541,51 @@ export default function App() {
           <div className="scope-selector-bar">
             <select
               className="scope-select"
-              value={selectedSourceFile}
-              onChange={(event) => setSelectedSourceFile(event.target.value)}
-              aria-label="做题范围选择"
+              value={scopeType}
+              onChange={(event) => setScopeType(event.target.value)}
+              aria-label="做题范围类型选择"
             >
               <option value="all">全部题库</option>
-              {uploadedFiles.map((item) => (
-                <option key={item.source_file} value={item.source_file}>
-                  {item.file_name}
-                </option>
-              ))}
+              <option value="source_file">按文件</option>
+              <option value="wrong_only">错题库</option>
             </select>
+            {scopeType === 'source_file' ? (
+              <select
+                className="scope-select"
+                value={selectedSourceFile}
+                onChange={(event) => setSelectedSourceFile(event.target.value)}
+                aria-label="做题范围文件选择"
+              >
+                <option value="all">请选择文件</option>
+                {uploadedFiles.map((item) => (
+                  <option key={item.source_file} value={item.source_file}>
+                    {item.file_name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               className="ghost-button scope-random-button"
-              onClick={() => loadQuestion(selectedSourceFile)}
+              onClick={() => loadQuestion(currentScopeQuery, { resetHistory: true })}
               disabled={loadingQuestion}
             >
               {loadingQuestion ? '加载中...' : '刷新范围题目'}
             </button>
           </div>
 
-          {selectedFileInfo ? (
+          {scopeType === 'source_file' && selectedFileInfo ? (
             <div className="selected-scope-summary">
               <strong>{selectedFileInfo.file_name}</strong>
               <p>
                 题目 {selectedFileInfo.question_count} 题 · 新增 {selectedFileInfo.inserted_count} ·
                 重复 {selectedFileInfo.skipped_count} · 兜底 {selectedFileInfo.fallback_question_count}
               </p>
+            </div>
+          ) : scopeType === 'wrong_only' ? (
+            <div className="selected-scope-summary all-scope-summary">
+              <strong>错题库练习</strong>
+              <p>会从当前错题库中随机抽题，适合集中复习薄弱点。</p>
             </div>
           ) : (
             <div className="selected-scope-summary all-scope-summary">
@@ -499,8 +699,11 @@ export default function App() {
                       <button
                         key={item.source_file}
                         type="button"
-                        className={`file-item compact-file-item ${selectedSourceFile === item.source_file ? 'active' : ''}`}
-                        onClick={() => setSelectedSourceFile(item.source_file)}
+                        className={`file-item compact-file-item ${scopeType === 'source_file' && selectedSourceFile === item.source_file ? 'active' : ''}`}
+                        onClick={() => {
+                          setScopeType('source_file')
+                          setSelectedSourceFile(item.source_file)
+                        }}
                       >
                         <div>
                           <strong>{item.file_name}</strong>
@@ -524,22 +727,43 @@ export default function App() {
 
         {error ? <div className="error-box">{error}</div> : null}
 
-        {loadingQuestion ? <section className="card">正在加载题目...</section> : null}
+        {activeView === 'quiz' && loadingQuestion ? <section className="card">正在加载题目...</section> : null}
 
-        {question ? (
+        {activeView === 'quiz' && question ? (
           <>
             <QuestionCard
               question={question}
               selectedAnswer={selectedAnswer}
               disabled={Boolean(result) || submitting}
               onSelect={(answer) => handleSubmit(answer)}
+              onSwipePrevious={handlePreviousQuestion}
+              onSwipeNext={handleNextQuestion}
+              canSwipePrevious={canSwipePrevious}
+              canSwipeNext={canSwipeNext}
               sourceLabel={currentSourceLabel}
               submitting={submitting}
             />
 
-            <div className="actions single-action-row">
-              <button type="button" className="secondary-button" onClick={() => loadQuestion()} disabled={loadingQuestion}>
-                下一题
+            <div className="actions question-navigation-actions">
+
+              <button type="button" className="secondary-button" onClick={handleNextQuestion} disabled={loadingQuestion || submitting}>
+                {canGoNextQuestion ? '下一题' : '换一题'}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={handlePreviousQuestion}
+                disabled={!canGoPreviousQuestion || loadingQuestion || submitting}
+              >
+                上一题
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={handleDeleteCurrentQuestion}
+                disabled={loadingQuestion || submitting || deletingQuestion}
+              >
+                {deletingQuestion ? '删除中...' : '删除当前题目'}
               </button>
             </div>
 
@@ -552,93 +776,160 @@ export default function App() {
           </>
         ) : null}
 
-        <section className="card">
-          <div className="section-header history-header">
-            <div>
-              <h2>题目管理</h2>
-              <span className="section-subtitle">{loadingHistory ? '加载中...' : `当前 ${historyTitle} ${displayHistory.length} 条`}</span>
+        {activeView === 'quiz' ? (
+          <section className="card">
+            <div className="section-header history-header">
+              <div>
+                <h2>题目管理</h2>
+                <span className="section-subtitle">{loadingHistory ? '加载中...' : `当前 ${historyTitle} ${displayHistory.length} 条`}</span>
+              </div>
+              <div className="history-tabs">
+                <button
+                  type="button"
+                  className={`tab-button ${historyTab === 'wrong' ? 'active' : ''}`}
+                  onClick={() => setHistoryTab('wrong')}
+                >
+                  错题
+                </button>
+                <button
+                  type="button"
+                  className={`tab-button ${historyTab === 'favorites' ? 'active' : ''}`}
+                  onClick={() => setHistoryTab('favorites')}
+                >
+                  收藏
+                </button>
+              </div>
             </div>
-            <div className="history-tabs">
-              <button
-                type="button"
-                className={`tab-button ${historyTab === 'wrong' ? 'active' : ''}`}
-                onClick={() => setHistoryTab('wrong')}
-              >
-                错题
-              </button>
-              <button
-                type="button"
-                className={`tab-button ${historyTab === 'favorites' ? 'active' : ''}`}
-                onClick={() => setHistoryTab('favorites')}
-              >
-                收藏
-              </button>
-            </div>
-          </div>
-          {displayHistory.length ? (
-            <div className="history-list compact-history-list">
-              {displayHistory.map((item) => {
-                const isExpanded = expandedQuestionIds.includes(item.question_id)
-                const actionLoading = historyActionQuestionId === item.question_id
-                return (
-                  <div key={item.question_id} className={`history-item compact ${isExpanded ? 'expanded' : ''}`}>
-                    <div className="history-row">
-                      <div className="history-main">
-                        <div className="history-title-row">
-                          <strong>第 {item.question_number} 题</strong>
-                          <span className="history-file-name">{item.file_name}</span>
-                          {item.is_favorite ? <span className="mini-badge favorite">已收藏</span> : null}
-                          {item.hidden_from_wrong_history ? <span className="mini-badge muted">已移出错题</span> : null}
+            {displayHistory.length ? (
+              <div className="history-list compact-history-list">
+                {displayHistory.map((item) => {
+                  const isExpanded = expandedQuestionIds.includes(item.question_id)
+                  const actionLoading = historyActionQuestionId === item.question_id
+                  const historyAI = historyAIByQuestionId[item.question_id] || ''
+                  const loadingHistoryAI = historyAILoadingId === item.question_id
+                  return (
+                    <div key={item.question_id} className={`history-item compact ${isExpanded ? 'expanded' : ''}`}>
+                      <div className="history-row">
+                        <div className="history-main">
+                          <div className="history-title-row">
+                            <strong>第 {item.question_number} 题</strong>
+                            <span className="history-file-name">{item.file_name}</span>
+                            <span className="mini-badge muted">已作答 {item.attempt_count || 0} 次</span>
+                            {item.is_favorite ? <span className="mini-badge favorite">已收藏</span> : null}
+                            {item.hidden_from_wrong_history ? <span className="mini-badge muted">已移出错题</span> : null}
+                          </div>
+                          <p className={`history-preview ${isExpanded ? 'expanded' : ''}`}>{item.stem}</p>
+                          <p className="history-meta">
+                            你的答案 {item.selected_answer} · 正确答案 {item.correct_answer}
+                            {item.subject ? ` · ${item.subject}` : ''}
+                            {item.year ? ` · ${item.year}` : ''}
+                            {item.answered_at ? ` · ${formatDateTime(item.answered_at)}` : ''}
+                          </p>
                         </div>
-                        <p className={`history-preview ${isExpanded ? 'expanded' : ''}`}>{item.stem}</p>
-                        <p className="history-meta">
-                          你的答案 {item.selected_answer} · 正确答案 {item.correct_answer}
-                          {item.subject ? ` · ${item.subject}` : ''}
-                          {item.year ? ` · ${item.year}` : ''}
-                          {item.answered_at ? ` · ${formatDateTime(item.answered_at)}` : ''}
-                        </p>
+                        <div className="history-actions-inline">
+                          <button
+                            type="button"
+                            className={`ghost-button ${item.is_favorite ? 'active' : ''}`}
+                            onClick={() => handleToggleFavorite(item)}
+                            disabled={actionLoading}
+                          >
+                            {item.is_favorite ? '取消收藏' : '收藏'}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => toggleExpandedQuestion(item.question_id)}
+                          >
+                            {isExpanded ? '收起' : '详情'}
+                          </button>
+                          <button
+                            type="button"
+                            className="danger-button"
+                            onClick={() => handleHideWrongItem(item)}
+                            disabled={actionLoading || item.hidden_from_wrong_history}
+                          >
+                            {item.hidden_from_wrong_history ? '已移除' : '删除'}
+                          </button>
+                        </div>
                       </div>
-                      <div className="history-actions-inline">
-                        <button
-                          type="button"
-                          className={`ghost-button ${item.is_favorite ? 'active' : ''}`}
-                          onClick={() => handleToggleFavorite(item)}
-                          disabled={actionLoading}
-                        >
-                          {item.is_favorite ? '取消收藏' : '收藏'}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() => toggleExpandedQuestion(item.question_id)}
-                        >
-                          {isExpanded ? '收起' : '详情'}
-                        </button>
-                        <button
-                          type="button"
-                          className="danger-button"
-                          onClick={() => handleHideWrongItem(item)}
-                          disabled={actionLoading || item.hidden_from_wrong_history}
-                        >
-                          {item.hidden_from_wrong_history ? '已移除' : '删除'}
-                        </button>
-                      </div>
+                      {isExpanded ? (
+                        <div className="history-detail">
+                          <p><strong>题干：</strong>{item.stem}</p>
+                          <p><strong>文件：</strong>{item.file_name}</p>
+                          <p><strong>作答时间：</strong>{formatDateTime(item.answered_at)}</p>
+                          <p><strong>解析：</strong>{item.explanation || '暂无解析'}</p>
+                          <div className="history-option-list">
+                            {item.options.map((option) => (
+                              <div key={`${item.question_id}-${option.label}`} className="history-option-item">
+                                <span className="option-label">{option.label}</span>
+                                <span>{option.content}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-button history-ai-button"
+                            onClick={() => handleHistoryAIExplanation(item.question_id)}
+                            disabled={loadingHistoryAI}
+                          >
+                            {loadingHistoryAI ? 'AI 解析生成中...' : 'AI 解析'}
+                          </button>
+                          {(historyAI || loadingHistoryAI) ? (
+                            <div className="ai-box markdown-body">
+                              <strong>AI 解析</strong>
+                              <ReactMarkdown>{historyAI || 'AI 正在生成解析，请稍候...'}</ReactMarkdown>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
-                    {isExpanded ? (
-                      <div className="history-detail">
-                        <p><strong>题干：</strong>{item.stem}</p>
-                        <p><strong>文件：</strong>{item.file_name}</p>
-                        <p><strong>作答时间：</strong>{formatDateTime(item.answered_at)}</p>
-                      </div>
-                    ) : null}
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="empty-text">{historyTab === 'wrong' ? '当前范围下还没有错题。' : '当前范围下还没有收藏题。'}</p>
+            )}
+          </section>
+        ) : (
+          <section className="card">
+            <div className="section-header history-header">
+              <div>
+                <h2>练习记录</h2>
+                <span className="section-subtitle">{loadingRecords ? '加载中...' : `共 ${recordBuckets.length} 个时间段`}</span>
+              </div>
             </div>
-          ) : (
-            <p className="empty-text">{historyTab === 'wrong' ? '当前范围下还没有错题。' : '当前范围下还没有收藏题。'}</p>
-          )}
-        </section>
+            {recordBuckets.length ? (
+              <div className="record-bucket-list">
+                {recordBuckets.map((bucket) => (
+                  <div key={bucket.bucket_start} className="record-bucket-item">
+                    <div className="record-bucket-header">
+                      <strong>{formatDateTime(bucket.bucket_start)}</strong>
+                      <span>
+                        练习 {bucket.attempt_count} 题 · 正确 {bucket.correct_count} · 错误 {bucket.wrong_count}
+                      </span>
+                    </div>
+                    <div className="record-bucket-entries">
+                      {bucket.items.map((item) => (
+                        <div key={item.attempt_id} className="record-entry-item">
+                          <div>
+                            <strong>第 {item.question_number} 题</strong>
+                            <p className="history-meta">{item.file_name} · {formatDateTime(item.answered_at)}</p>
+                            <p className="history-preview expanded">{item.stem}</p>
+                          </div>
+                          <span className={`status-badge ${item.is_correct ? 'success' : 'failed'}`}>
+                            {item.is_correct ? '正确' : '错误'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-text">还没有练习记录。</p>
+            )}
+          </section>
+        )}
       </div>
     </main>
   )
