@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      QUIZ_LLM_BASE_URL: ${QUIZ_LLM_BASE_URL:-http://host.docker.internal:8888/v1}
+      QUIZ_LLM_API_KEY: ${QUIZ_LLM_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      QUIZ_LLM_MODEL: ${QUIZ_LLM_MODEL:-Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit}
+      QUIZ_CORS_ORIGINS: ${QUIZ_CORS_ORIGINS:-http://localhost,http://127.0.0.1}
+    volumes:
+      - ./data:/app/data
+      - ./pdf:/app/pdf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
