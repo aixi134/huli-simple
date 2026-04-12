@@ -76,6 +76,15 @@ class UploadedFileOut(BaseModel):
     last_imported_at: datetime
 
 
+class UploadedFileDeleteOut(BaseModel):
+    file_id: str
+    source_file: str
+    file_name: str
+    deleted_question_count: int = 0
+    pdf_deleted: bool = False
+    deleted: bool = True
+
+
 class WrongAnswerHistoryItemOut(BaseModel):
     attempt_id: str
     question_id: str
@@ -131,6 +140,12 @@ class PracticeRecordBucketOut(BaseModel):
     correct_count: int
     wrong_count: int
     items: list[PracticeRecordItemOut] = Field(default_factory=list)
+
+
+class ScopeStatsOut(BaseModel):
+    total_count: int
+    completed_count: int
+    remaining_count: int
 
 
 class HealthOut(BaseModel):

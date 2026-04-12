@@ -21,6 +21,22 @@ export function fetchUploadedFiles() {
   return request('/files')
 }
 
+export function deleteUploadedFile(fileId) {
+  return request(`/files/${fileId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function fetchScopeStats({ scopeType = 'all', sourceFile = 'all' } = {}) {
+  const params = new URLSearchParams()
+  params.set('scope_type', scopeType)
+  if (scopeType === 'source_file' && sourceFile && sourceFile !== 'all') {
+    params.set('source_file', sourceFile)
+  }
+  const query = params.toString() ? `?${params.toString()}` : ''
+  return request(`/scope/stats${query}`)
+}
+
 export function fetchRandomQuestion({ scopeType = 'all', sourceFile = 'all' } = {}) {
   const params = new URLSearchParams()
   params.set('scope_type', scopeType)

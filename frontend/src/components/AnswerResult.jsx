@@ -1,12 +1,12 @@
 import ReactMarkdown from 'react-markdown'
 
-export default function AnswerResult({ result, aiExplanation, loadingAI, onRequestAIExplanation }) {
+export default function AnswerResult({ result, aiExplanation, loadingAI, onRequestAIExplanation, embedded = false }) {
   if (!result) {
     return null
   }
 
   return (
-    <section className="card result-card">
+    <section className={`result-card ${embedded ? 'embedded' : 'card'}`}>
       <div className={`result-badge ${result.correct ? 'correct' : 'wrong'}`}>
         {result.correct ? '回答正确' : '回答错误'}
       </div>
@@ -16,7 +16,7 @@ export default function AnswerResult({ result, aiExplanation, loadingAI, onReque
         {loadingAI ? 'AI 讲解生成中...' : 'AI 讲题'}
       </button>
       {(aiExplanation || loadingAI) ? (
-        <div className="ai-box markdown-body">
+        <div className={`ai-box markdown-body ${embedded ? 'embedded' : ''}`}>
           <strong>AI 讲解</strong>
           <ReactMarkdown>{aiExplanation || 'AI 正在生成讲解，请稍候...'}</ReactMarkdown>
         </div>

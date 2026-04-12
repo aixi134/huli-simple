@@ -42,6 +42,24 @@ def list_files(db: Session = Depends(get_db)) -> list[schemas.UploadedFileOut]:
     return [schemas.UploadedFileOut(**item) for item in crud.list_uploaded_files(db)]
 
 
+@app.delete("/files/{file_id}", response_model=schemas.UploadedFileDeleteOut)
+def delete_file(file_id: str, db: Session = Depends(get_db)) -> schemas.UploadedFileDeleteOut:
+    deleted = crud.delete_uploaded_file(db, file_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return schemas.UploadedFileDeleteOut(**deleted)
+
+
+@app.get("/scope/stats", response_model=schemas.ScopeStatsOut)
+def scope_stats(
+    source_file: str | None = Query(default=None),
+    scope_type: Literal["all", "source_file", "wrong_only"] = Query(default="all"),
+    db: Session = Depends(get_db),
+) -> schemas.ScopeStatsOut:
+    normalized_source = None if not source_file or source_file == "all" else source_file
+    return schemas.ScopeStatsOut(**crud.get_scope_progress_stats(db, source_file=normalized_source, scope_type=scope_type))
+
+
 @app.get("/question/random", response_model=schemas.QuestionOut)
 def get_random_question(
     source_file: str | None = Query(default=None),
@@ -51,12 +69,21 @@ def get_random_question(
     normalized_source = None if not source_file or source_file == "all" else source_file
     question = crud.get_random_question(db, source_file=normalized_source, scope_type=scope_type)
     if question is None:
+        question_count = crud.get_scope_question_count(db, source_file=normalized_source, scope_type=scope_type)
         if scope_type == "wrong_only":
+            if question_count > 0:
+                raise HTTPException(status_code=404, detail="错题库中的题目已全部答对")
             raise HTTPException(status_code=404, detail="错题库为空，请先做错几题")
         if scope_type == "source_file" and normalized_source:
+            if question_count > 0:
+                raise HTTPException(status_code=404, detail="该文件中的题目已全部答对")
             raise HTTPException(status_code=404, detail="该文件下暂无题目，请重新选择")
         if normalized_source:
+            if question_count > 0:
+                raise HTTPException(status_code=404, detail="该文件中的题目已全部答对")
             raise HTTPException(status_code=404, detail="该文件下暂无题目，请重新选择")
+        if question_count > 0:
+            raise HTTPException(status_code=404, detail="当前范围题目已全部答对")
         raise HTTPException(status_code=404, detail="题库为空，请先导入题目")
     return schemas.QuestionOut(**crud.serialize_question(question, attempt_count=crud.get_question_attempt_count(db, question.id)))
 

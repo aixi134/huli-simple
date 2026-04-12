@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -18,12 +19,13 @@ def get_question_attempt_count(db: Session, question_id: str) -> int:
     return db.scalar(select(func.count()).select_from(AnswerAttempt).where(AnswerAttempt.question_id == question_id)) or 0
 
 
-def get_random_question(
+def build_scope_question_stmt(
     db: Session,
     source_file: str | None = None,
     *,
     scope_type: str = "all",
-) -> Question | None:
+):
+    del db
     stmt = select(Question).options(selectinload(Question.options), selectinload(Question.user_state))
     if scope_type == "source_file":
         if not source_file:
@@ -31,13 +33,89 @@ def get_random_question(
         stmt = stmt.where(Question.source_file == source_file)
     elif scope_type == "wrong_only":
         wrong_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(False)).distinct()
-        stmt = stmt.where(Question.id.in_(wrong_question_ids)).where(
+        correct_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(True)).distinct()
+        stmt = stmt.where(Question.id.in_(wrong_question_ids)).where(Question.id.not_in(correct_question_ids)).where(
             (Question.user_state == None) | (Question.user_state.has(hidden_from_wrong_history=False))
         )
     elif source_file:
         stmt = stmt.where(Question.source_file == source_file)
-    stmt = stmt.order_by(func.random()).limit(1)
-    return db.scalar(stmt)
+    return stmt
+
+
+def get_scope_question_count(
+    db: Session,
+    source_file: str | None = None,
+    *,
+    scope_type: str = "all",
+) -> int:
+    if scope_type == "wrong_only":
+        wrong_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(False)).distinct()
+        stmt = select(func.count()).select_from(Question).where(Question.id.in_(wrong_question_ids)).where(
+            (Question.user_state == None) | (Question.user_state.has(hidden_from_wrong_history=False))
+        )
+        return db.scalar(stmt) or 0
+
+    stmt = build_scope_question_stmt(db, source_file=source_file, scope_type=scope_type)
+    if stmt is None:
+        return 0
+    return db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+
+
+def get_scope_progress_stats(
+    db: Session,
+    source_file: str | None = None,
+    *,
+    scope_type: str = "all",
+) -> dict[str, int]:
+    total_count = get_scope_question_count(db, source_file=source_file, scope_type=scope_type)
+    remaining_count = 0
+    stmt = build_scope_question_stmt(db, source_file=source_file, scope_type=scope_type)
+    if stmt is not None:
+        attempted_question_ids = select(AnswerAttempt.question_id).distinct()
+        correct_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(True)).distinct()
+
+        remaining_count += db.scalar(
+            select(func.count()).select_from(
+                stmt.where(Question.id.not_in(attempted_question_ids)).subquery()
+            )
+        ) or 0
+        remaining_count += db.scalar(
+            select(func.count()).select_from(
+                stmt.where(Question.id.in_(attempted_question_ids)).where(Question.id.not_in(correct_question_ids)).subquery()
+            )
+        ) or 0
+
+    completed_count = max(total_count - remaining_count, 0)
+    return {
+        "total_count": total_count,
+        "completed_count": completed_count,
+        "remaining_count": remaining_count,
+    }
+
+
+def get_random_question(
+    db: Session,
+    source_file: str | None = None,
+    *,
+    scope_type: str = "all",
+) -> Question | None:
+    stmt = build_scope_question_stmt(db, source_file=source_file, scope_type=scope_type)
+    if stmt is None:
+        return None
+    attempted_question_ids = select(AnswerAttempt.question_id).distinct()
+    correct_question_ids = select(AnswerAttempt.question_id).where(AnswerAttempt.is_correct.is_(True)).distinct()
+
+    unseen_question = db.scalar(stmt.where(Question.id.not_in(attempted_question_ids)).order_by(func.random()).limit(1))
+    if unseen_question is not None:
+        return unseen_question
+
+    unresolved_question = db.scalar(
+        stmt.where(Question.id.in_(attempted_question_ids)).where(Question.id.not_in(correct_question_ids)).order_by(func.random()).limit(1)
+    )
+    if unresolved_question is not None:
+        return unresolved_question
+
+    return None
 
 
 def get_question_by_id(db: Session, question_id: str) -> Question | None:
@@ -108,6 +186,10 @@ def import_question_payload(db: Session, payload: dict[str, object]) -> tuple[in
 
 def get_uploaded_file(db: Session, source_file: str) -> UploadedFile | None:
     return db.scalar(select(UploadedFile).where(UploadedFile.source_file == source_file))
+
+
+def get_uploaded_file_by_id(db: Session, file_id: str) -> UploadedFile | None:
+    return db.get(UploadedFile, file_id)
 
 
 def upsert_uploaded_file(
@@ -247,6 +329,38 @@ def delete_question(db: Session, question_id: str) -> bool:
     db.delete(question)
     db.commit()
     return True
+
+
+def delete_uploaded_file(db: Session, file_id: str) -> dict[str, object] | None:
+    record = get_uploaded_file_by_id(db, file_id)
+    if record is None:
+        return None
+
+    source_file = record.source_file
+    file_name = record.file_name
+    stored_path = record.stored_path
+    questions = db.scalars(select(Question).where(Question.source_file == source_file)).all()
+    deleted_question_count = len(questions)
+    for question in questions:
+        db.delete(question)
+    db.delete(record)
+    db.commit()
+
+    pdf_deleted = False
+    if stored_path:
+        path = Path(stored_path)
+        if path.exists():
+            path.unlink()
+            pdf_deleted = True
+
+    return {
+        "file_id": file_id,
+        "source_file": source_file,
+        "file_name": file_name,
+        "deleted_question_count": deleted_question_count,
+        "pdf_deleted": pdf_deleted,
+        "deleted": True,
+    }
 
 
 def create_answer_attempt(

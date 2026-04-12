@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import AnswerResult from './AnswerResult'
 
 export default function QuestionCard({
   question,
@@ -11,6 +12,10 @@ export default function QuestionCard({
   canSwipeNext = false,
   sourceLabel,
   submitting = false,
+  result = null,
+  aiExplanation = '',
+  loadingAI = false,
+  onRequestAIExplanation,
 }) {
   const touchStartRef = useRef(null)
 
@@ -75,6 +80,13 @@ export default function QuestionCard({
           )
         })}
       </div>
+      <AnswerResult
+        result={result}
+        aiExplanation={aiExplanation}
+        loadingAI={loadingAI}
+        onRequestAIExplanation={onRequestAIExplanation}
+        embedded
+      />
     </section>
   )
 }

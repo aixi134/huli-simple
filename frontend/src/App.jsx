@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import {
   deleteQuestion,
+  deleteUploadedFile,
   fetchPracticeRecords,
   fetchRandomQuestion,
+  fetchScopeStats,
   fetchUploadedFiles,
   fetchWrongAnswerHistory,
   importPdfs,
@@ -12,7 +14,6 @@ import {
   updateWrongQuestionState,
 } from './api'
 import QuestionCard from './components/QuestionCard'
-import AnswerResult from './components/AnswerResult'
 
 function formatDateTime(value) {
   if (!value) {
@@ -101,7 +102,10 @@ export default function App() {
   const [historyAILoadingId, setHistoryAILoadingId] = useState('')
   const [recordBuckets, setRecordBuckets] = useState([])
   const [loadingRecords, setLoadingRecords] = useState(true)
+  const [scopeStats, setScopeStats] = useState({ total_count: 0, completed_count: 0, remaining_count: 0 })
+  const [loadingScopeStats, setLoadingScopeStats] = useState(true)
   const [deletingQuestion, setDeletingQuestion] = useState(false)
+  const [deletingFileId, setDeletingFileId] = useState('')
   const [libraryPanelOpen, setLibraryPanelOpen] = useState(false)
   const [questionHistory, setQuestionHistory] = useState([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(-1)
@@ -139,12 +143,21 @@ export default function App() {
     : scopeType === 'source_file'
       ? (selectedSourceFile !== 'all' ? (sourceLabelMap[selectedSourceFile] || '当前文件') : '未选择文件')
       : '全部题库'
+  const currentScopeHint = scopeType === 'wrong_only'
+    ? '仅推送仍未订正的错题'
+    : scopeType === 'source_file'
+      ? '优先未做题，已答对题默认不再推送'
+      : '优先未做题，已答对题默认不再推送'
   const selectedFileInfo = uploadedFiles.find((item) => item.source_file === selectedSourceFile) || null
   const displayHistory = historyTab === 'favorites'
     ? wrongHistory
     : wrongHistory.filter((item) => !item.hidden_from_wrong_history)
   const currentScopeQuery = getScopeQuery(scopeType, selectedSourceFile)
   const recordsSourceFile = scopeType === 'source_file' ? selectedSourceFile : 'all'
+  const totalRecordAttemptCount = useMemo(
+    () => recordBuckets.reduce((total, bucket) => total + (bucket.attempt_count ?? bucket.items?.length ?? 0), 0),
+    [recordBuckets],
+  )
 
   async function refreshUploadedFiles() {
     setLoadingFiles(true)
@@ -177,6 +190,16 @@ export default function App() {
       setRecordBuckets(records)
     } finally {
       setLoadingRecords(false)
+    }
+  }
+
+  async function refreshScopeStats(scope = currentScopeQuery) {
+    setLoadingScopeStats(true)
+    try {
+      const stats = await fetchScopeStats(scope)
+      setScopeStats(stats)
+    } finally {
+      setLoadingScopeStats(false)
     }
   }
 
@@ -284,6 +307,7 @@ export default function App() {
     }
     refreshWrongHistory(selectedSourceFile, historyTab).catch((err) => setError(err.message))
     refreshPracticeRecords(recordsSourceFile).catch((err) => setError(err.message))
+    refreshScopeStats(currentScopeQuery).catch((err) => setError(err.message))
   }, [initialized, selectedSourceFile, historyTab, scopeType])
 
   async function handleSubmit(answerToSubmit = selectedAnswer) {
@@ -298,6 +322,7 @@ export default function App() {
       const data = await submitAnswer(question.id, answerToSubmit)
       setQuestion((current) => (current ? { ...current, attempt_count: data.attempt_count } : current))
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshScopeStats(currentScopeQuery)
       if (data.correct) {
         await handleNextQuestion()
         return
@@ -374,6 +399,7 @@ export default function App() {
       await refreshUploadedFiles()
       await refreshWrongHistory(selectedSourceFile, historyTab)
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshScopeStats(currentScopeQuery)
       if (!question) {
         await loadQuestion(currentScopeQuery)
       }
@@ -383,6 +409,66 @@ export default function App() {
       setUploadStage('idle')
     } finally {
       setUploading(false)
+    }
+  }
+
+  async function handleDeleteUploadedFile(item) {
+    if (!item || deletingFileId) {
+      return
+    }
+    const confirmed = window.confirm(`确认删除文件“${item.file_name}”吗？删除后将同时移除该文件下的题目、作答记录和错题记录。`)
+    if (!confirmed) {
+      return
+    }
+
+    const removedQuestionIds = wrongHistory
+      .filter((historyItem) => historyItem.source_file === item.source_file)
+      .map((historyItem) => historyItem.question_id)
+
+    setDeletingFileId(item.id)
+    setError('')
+    try {
+      await deleteUploadedFile(item.id)
+      const nextScopeType = scopeType === 'source_file' && selectedSourceFile === item.source_file ? 'all' : scopeType
+      const nextSourceFile = selectedSourceFile === item.source_file ? 'all' : selectedSourceFile
+      const nextScopeQuery = getScopeQuery(nextScopeType, nextSourceFile)
+      const nextHistory = questionHistoryRef.current.filter((entry) => entry.source_file !== item.source_file)
+      const currentQuestionDeleted = question?.source_file === item.source_file
+
+      setQuestionHistory(nextHistory)
+      setCurrentQuestionIndex(-1)
+      setWrongHistory((current) => current.filter((historyItem) => historyItem.source_file !== item.source_file))
+      setExpandedQuestionIds((current) => current.filter((id) => !removedQuestionIds.includes(id)))
+      setHistoryAIByQuestionId((current) => {
+        const next = { ...current }
+        removedQuestionIds.forEach((questionId) => {
+          delete next[questionId]
+        })
+        return next
+      })
+      if (currentQuestionDeleted) {
+        setQuestion(null)
+        setResult(null)
+        setAIExplanation('')
+      }
+      if (selectedSourceFile === item.source_file) {
+        setSelectedSourceFile('all')
+      }
+      if (scopeType === 'source_file' && selectedSourceFile === item.source_file) {
+        setScopeType('all')
+      }
+      await refreshUploadedFiles()
+      await refreshWrongHistory(nextSourceFile, historyTab)
+      await refreshPracticeRecords(nextScopeType === 'source_file' ? nextSourceFile : 'all')
+      await refreshScopeStats(nextScopeQuery)
+      if (currentQuestionDeleted || nextHistory.length === 0 || scopeType !== nextScopeType || selectedSourceFile !== nextSourceFile) {
+        await loadQuestion(nextScopeQuery, { resetHistory: true })
+      }
+      setLibraryPanelOpen(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDeletingFileId('')
     }
   }
 
@@ -447,6 +533,7 @@ export default function App() {
       await refreshUploadedFiles()
       await refreshWrongHistory(selectedSourceFile, historyTab)
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshScopeStats(currentScopeQuery)
       await loadQuestion(currentScopeQuery, { resetHistory: true })
     } catch (err) {
       setError(err.message)
@@ -495,6 +582,81 @@ export default function App() {
     ))
   }
 
+  function handleScopeTypeChange(value) {
+    setScopeType(value)
+    if (value !== 'source_file') {
+      setSelectedSourceFile('all')
+    }
+    if (window.innerWidth <= 720 && value !== 'source_file') {
+      setLibraryPanelOpen(false)
+    }
+  }
+
+  function handleSelectSourceFile(value) {
+    setScopeType('source_file')
+    setSelectedSourceFile(value)
+    if (window.innerWidth <= 720 && value !== 'all') {
+      setLibraryPanelOpen(false)
+    }
+  }
+
+  function renderScopeProgressBadges() {
+    if (loadingScopeStats) {
+      return <span className="section-subtitle">统计中...</span>
+    }
+
+    return (
+      <div className="summary-badge-row">
+        <span className="mini-badge done">已做 {scopeStats.completed_count}</span>
+        <span className="mini-badge pending">未做 {scopeStats.remaining_count}</span>
+      </div>
+    )
+  }
+
+  function renderPracticeRecordSummaryBadges() {
+    if (loadingRecords) {
+      return <span className="section-subtitle">加载中...</span>
+    }
+
+    return (
+      <div className="summary-badge-row">
+        <span className="mini-badge muted">时间段 {recordBuckets.length}</span>
+        <span className="mini-badge total">已做总数 {totalRecordAttemptCount}</span>
+      </div>
+    )
+  }
+
+  function renderScopeSummary() {
+    if (scopeType === 'source_file' && selectedFileInfo) {
+      return (
+        <div className="selected-scope-summary">
+          <strong>{selectedFileInfo.file_name}</strong>
+          <p>
+            题目 {selectedFileInfo.question_count} 题 · 新增 {selectedFileInfo.inserted_count} ·
+            重复 {selectedFileInfo.skipped_count} · 兜底 {selectedFileInfo.fallback_question_count}
+          </p>
+          {renderScopeProgressBadges()}
+        </div>
+      )
+    }
+    if (scopeType === 'wrong_only') {
+      return (
+        <div className="selected-scope-summary all-scope-summary">
+          <strong>错题库练习</strong>
+          <p>只推送仍未订正的错题，适合集中复习薄弱点。</p>
+          {renderScopeProgressBadges()}
+        </div>
+      )
+    }
+    return (
+      <div className="selected-scope-summary all-scope-summary">
+        <strong>全部题库随机练习</strong>
+        <p>优先推送未做题，已答对题默认不再重复出现。</p>
+        {renderScopeProgressBadges()}
+      </div>
+    )
+  }
+
   return (
     <main className="page">
       <div className="container">
@@ -503,6 +665,11 @@ export default function App() {
             <h1>护理刷题系统</h1>
             <p>支持多文件导入、按文件练题、错题收藏与紧凑错题管理</p>
             {questionProgressText ? <p className="session-progress">{questionProgressText}</p> : null}
+            <div className="scope-status-chip">
+              <strong>当前范围：</strong>{currentScopeLabel}
+              <span>{currentScopeHint}</span>
+              {renderScopeProgressBadges()}
+            </div>
           </div>
           <div className="header-actions">
             <div className="view-tabs">
@@ -519,82 +686,78 @@ export default function App() {
           </div>
         </header>
 
-        <section className="card library-card">
-          <div className="library-toolbar">
-            <div className="library-toolbar-main">
-              <h2>做题范围</h2>
-              <p className="section-subtitle">
-                当前：{currentScopeLabel} · {loadingFiles ? '文件加载中...' : `共 ${uploadedFiles.length} 个文件`}
-              </p>
-            </div>
-            <div className="library-toolbar-actions">
-              <button
-                type="button"
-                className="secondary-button compact-toggle-button"
-                onClick={() => setLibraryPanelOpen((open) => !open)}
-              >
-                {libraryPanelOpen ? '收起题库' : '管理题库'}
-              </button>
-            </div>
-          </div>
+        {libraryPanelOpen ? <button type="button" className="library-overlay-backdrop" aria-label="关闭题库面板" onClick={() => setLibraryPanelOpen(false)} /> : null}
 
-          <div className="scope-selector-bar">
-            <select
-              className="scope-select"
-              value={scopeType}
-              onChange={(event) => setScopeType(event.target.value)}
-              aria-label="做题范围类型选择"
-            >
-              <option value="all">全部题库</option>
-              <option value="source_file">按文件</option>
-              <option value="wrong_only">错题库</option>
-            </select>
-            {scopeType === 'source_file' ? (
+        <button
+          type="button"
+          className={`library-fab ${libraryPanelOpen ? 'open' : ''}`}
+          onClick={() => setLibraryPanelOpen((open) => !open)}
+          aria-expanded={libraryPanelOpen}
+          aria-controls="library-panel"
+        >
+          <span className="library-fab-label">题库</span>
+          <span className="library-fab-meta">{currentScopeLabel}</span>
+        </button>
+
+        {libraryPanelOpen ? (
+          <section id="library-panel" className="library-overlay card" role="dialog" aria-modal="true" aria-label="题库管理抽屉">
+            <div className="library-sheet-handle" aria-hidden="true" />
+            <div className="library-toolbar">
+              <div className="library-toolbar-main">
+                <h2>做题范围</h2>
+                <p className="section-subtitle">
+                  当前：{currentScopeLabel} · {loadingFiles ? '文件加载中...' : `共 ${uploadedFiles.length} 个文件`}
+                </p>
+              </div>
+              <div className="library-toolbar-actions">
+                <button
+                  type="button"
+                  className="secondary-button compact-toggle-button"
+                  onClick={() => setLibraryPanelOpen(false)}
+                >
+                  关闭题库
+                </button>
+              </div>
+            </div>
+
+            <div className="scope-selector-bar">
               <select
                 className="scope-select"
-                value={selectedSourceFile}
-                onChange={(event) => setSelectedSourceFile(event.target.value)}
-                aria-label="做题范围文件选择"
+                value={scopeType}
+                onChange={(event) => handleScopeTypeChange(event.target.value)}
+                aria-label="做题范围类型选择"
               >
-                <option value="all">请选择文件</option>
-                {uploadedFiles.map((item) => (
-                  <option key={item.source_file} value={item.source_file}>
-                    {item.file_name}
-                  </option>
-                ))}
+                <option value="all">全部题库</option>
+                <option value="source_file">按文件</option>
+                <option value="wrong_only">错题库</option>
               </select>
-            ) : null}
-            <button
-              type="button"
-              className="ghost-button scope-random-button"
-              onClick={() => loadQuestion(currentScopeQuery, { resetHistory: true })}
-              disabled={loadingQuestion}
-            >
-              {loadingQuestion ? '加载中...' : '刷新范围题目'}
-            </button>
-          </div>
+              {scopeType === 'source_file' ? (
+                <select
+                  className="scope-select"
+                  value={selectedSourceFile}
+                  onChange={(event) => handleSelectSourceFile(event.target.value)}
+                  aria-label="做题范围文件选择"
+                >
+                  <option value="all">请选择文件</option>
+                  {uploadedFiles.map((item) => (
+                    <option key={item.source_file} value={item.source_file}>
+                      {item.file_name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                type="button"
+                className="ghost-button scope-random-button"
+                onClick={() => loadQuestion(currentScopeQuery, { resetHistory: true })}
+                disabled={loadingQuestion}
+              >
+                {loadingQuestion ? '加载中...' : '刷新范围题目'}
+              </button>
+            </div>
 
-          {scopeType === 'source_file' && selectedFileInfo ? (
-            <div className="selected-scope-summary">
-              <strong>{selectedFileInfo.file_name}</strong>
-              <p>
-                题目 {selectedFileInfo.question_count} 题 · 新增 {selectedFileInfo.inserted_count} ·
-                重复 {selectedFileInfo.skipped_count} · 兜底 {selectedFileInfo.fallback_question_count}
-              </p>
-            </div>
-          ) : scopeType === 'wrong_only' ? (
-            <div className="selected-scope-summary all-scope-summary">
-              <strong>错题库练习</strong>
-              <p>会从当前错题库中随机抽题，适合集中复习薄弱点。</p>
-            </div>
-          ) : (
-            <div className="selected-scope-summary all-scope-summary">
-              <strong>全部题库随机练习</strong>
-              <p>会从所有已导入文件中随机抽题，更适合连续刷题。</p>
-            </div>
-          )}
+            {renderScopeSummary()}
 
-          {libraryPanelOpen ? (
             <div className="library-panel">
               <div className="library-upload-block">
                 <div className="section-header compact-section-header">
@@ -696,25 +859,34 @@ export default function App() {
                 {uploadedFiles.length ? (
                   <div className="file-list compact-file-list">
                     {uploadedFiles.map((item) => (
-                      <button
+                      <div
                         key={item.source_file}
-                        type="button"
                         className={`file-item compact-file-item ${scopeType === 'source_file' && selectedSourceFile === item.source_file ? 'active' : ''}`}
-                        onClick={() => {
-                          setScopeType('source_file')
-                          setSelectedSourceFile(item.source_file)
-                        }}
                       >
-                        <div>
-                          <strong>{item.file_name}</strong>
-                          <p className="file-meta">题目 {item.question_count} 题 · 最近导入 {formatDateTime(item.last_imported_at)}</p>
-                        </div>
-                        <div className="file-stats">
-                          <span>新增 {item.inserted_count}</span>
-                          <span>重复 {item.skipped_count}</span>
-                          <span>兜底 {item.fallback_question_count}</span>
-                        </div>
-                      </button>
+                        <button
+                          type="button"
+                          className="file-item-main"
+                          onClick={() => handleSelectSourceFile(item.source_file)}
+                        >
+                          <div>
+                            <strong>{item.file_name}</strong>
+                            <p className="file-meta">题目 {item.question_count} 题 · 最近导入 {formatDateTime(item.last_imported_at)}</p>
+                          </div>
+                          <div className="file-stats">
+                            <span>新增 {item.inserted_count}</span>
+                            <span>重复 {item.skipped_count}</span>
+                            <span>兜底 {item.fallback_question_count}</span>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-button file-delete-button"
+                          onClick={() => handleDeleteUploadedFile(item)}
+                          disabled={deletingFileId === item.id}
+                        >
+                          {deletingFileId === item.id ? '删除中...' : '删除文件'}
+                        </button>
+                      </div>
                     ))}
                   </div>
                 ) : (
@@ -722,8 +894,8 @@ export default function App() {
                 )}
               </div>
             </div>
-          ) : null}
-        </section>
+          </section>
+        ) : null}
 
         {error ? <div className="error-box">{error}</div> : null}
 
@@ -742,6 +914,10 @@ export default function App() {
               canSwipeNext={canSwipeNext}
               sourceLabel={currentSourceLabel}
               submitting={submitting}
+              result={result}
+              aiExplanation={aiExplanation}
+              loadingAI={loadingAI}
+              onRequestAIExplanation={handleAIExplanation}
             />
 
             <div className="actions question-navigation-actions">
@@ -767,12 +943,6 @@ export default function App() {
               </button>
             </div>
 
-            <AnswerResult
-              result={result}
-              aiExplanation={aiExplanation}
-              loadingAI={loadingAI}
-              onRequestAIExplanation={handleAIExplanation}
-            />
           </>
         ) : null}
 
@@ -895,7 +1065,7 @@ export default function App() {
             <div className="section-header history-header">
               <div>
                 <h2>练习记录</h2>
-                <span className="section-subtitle">{loadingRecords ? '加载中...' : `共 ${recordBuckets.length} 个时间段`}</span>
+                {renderPracticeRecordSummaryBadges()}
               </div>
             </div>
             {recordBuckets.length ? (
