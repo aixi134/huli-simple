@@ -6,8 +6,16 @@ from pathlib import Path
 from backend.app.services.ai_client import AIClient
 
 
+PARSER_LLM_REQUESTS_PER_MINUTE = 30
+PARSER_LLM_RETRY_ATTEMPTS = 3
+
+
+def build_parser_ai_client() -> AIClient:
+    return AIClient(rate_limit_per_minute=PARSER_LLM_REQUESTS_PER_MINUTE, retry_attempts=PARSER_LLM_RETRY_ATTEMPTS)
+
+
 def extract_with_gemma(page_text: str) -> dict[str, object]:
-    client = AIClient()
+    client = build_parser_ai_client()
     system_prompt = (
         "你是一个严格的题目抽取器。"
         "只返回 JSON，不要输出 markdown，不要输出解释。"
@@ -26,7 +34,7 @@ def extract_with_gemma(page_text: str) -> dict[str, object]:
 def extract_with_gemma_from_image(image_path: str | Path) -> dict[str, object]:
     path = Path(image_path)
     content = base64.b64encode(path.read_bytes()).decode("utf-8")
-    client = AIClient()
+    client = build_parser_ai_client()
     system_prompt = (
         "你是一个严格的 OCR 题目抽取器。"
         "你会从试卷图片中抽取单选题，并且只返回 JSON。"
