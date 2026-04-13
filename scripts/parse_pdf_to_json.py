@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +13,12 @@ if str(REPO_ROOT) not in sys.path:
 from backend.app.config import settings
 import fitz
 
-from backend.app.services.parser_fallback import extract_with_gemma, extract_with_gemma_from_image
+from backend.app.services.parser_fallback import (
+    OCRProviderConfigurationError,
+    extract_with_gemma,
+    extract_with_gemma_from_image,
+    get_ocr_runtime_summary,
+)
 from backend.app.services.parser_rules import (
     ParseError,
     build_structured_output,
@@ -27,26 +34,92 @@ from backend.app.services.parser_rules import (
 )
 
 
-def parse_pdf_with_ocr(pdf_path: Path) -> dict[str, object]:
-    doc = fitz.open(pdf_path)
-    all_questions: list[dict[str, object]] = []
-    for index, page in enumerate(doc, start=1):
-        image_path = settings.failed_dir / f"{pdf_path.stem}.page-{index}.png"
-        page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False).save(image_path)
+logger = logging.getLogger(__name__)
+
+OCR_FALLBACK_BASE_SCALE = 1.25
+OCR_FALLBACK_MAX_PAGE_EDGE = 1280
+OCR_FALLBACK_MAX_CONCURRENCY = 5
+
+
+def render_ocr_page_image(page: fitz.Page, pdf_path: Path, page_number: int) -> Path:
+    max_page_edge = max(float(page.rect.width), float(page.rect.height), 1.0)
+    scale = min(OCR_FALLBACK_BASE_SCALE, OCR_FALLBACK_MAX_PAGE_EDGE / max_page_edge)
+    image_path = settings.failed_dir / f"{pdf_path.stem}.page-{page_number}.jpg"
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, alpha=False)
+    pixmap.save(image_path)
+    return image_path
+
+
+def append_ocr_metadata(parse_stats: dict[str, object], *, attempted: bool, fatal_error_code: str | None = None, fatal_error: str | None = None) -> None:
+    runtime = get_ocr_runtime_summary()
+    parse_stats["ocr_attempted"] = attempted
+    parse_stats["ocr_enabled"] = bool(runtime["enabled"])
+    parse_stats["ocr_provider"] = runtime["provider"]
+    parse_stats["ocr_model"] = runtime["model"]
+    parse_stats["ocr_base_url"] = runtime["base_url"]
+    if fatal_error_code:
+        parse_stats["fatal_error_code"] = fatal_error_code
+    if fatal_error:
+        parse_stats["fatal_error"] = fatal_error
+
+
+def parse_ocr_page_task(task: tuple[int, Path, Path]) -> list[dict[str, object]]:
+    page_number, image_path, pdf_path = task
+    try:
         parsed = extract_with_gemma_from_image(image_path)
-        for item in parsed.get("questions", []):
-            item["parse_method"] = "llm_fallback"
-            item["source_file"] = str(pdf_path)
-            item["source_page_start"] = index
-            item["source_page_end"] = index
-            if "number" in item:
-                try:
-                    item["number"] = int(item["number"])
-                except (TypeError, ValueError):
-                    continue
-            all_questions.append(item)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"第 {page_number} 页 OCR 失败：{exc}") from exc
+
+    page_items: list[dict[str, object]] = []
+    for item in parsed.get("questions", []):
+        item["parse_method"] = "llm_fallback"
+        item["source_file"] = str(pdf_path)
+        item["source_page_start"] = page_number
+        item["source_page_end"] = page_number
+        if "number" in item:
+            try:
+                item["number"] = int(item["number"])
+            except (TypeError, ValueError):
+                continue
+        page_items.append(item)
+    return page_items
+
+
+def parse_pdf_with_ocr(pdf_path: Path) -> dict[str, object]:
+    question_errors: list[str] = []
+    fatal_error_code: str | None = None
+    try:
+        doc = fitz.open(pdf_path)
+        page_tasks = [
+            (index, render_ocr_page_image(page, pdf_path, index), pdf_path)
+            for index, page in enumerate(doc, start=1)
+        ]
+        all_questions = []
+        with ThreadPoolExecutor(max_workers=OCR_FALLBACK_MAX_CONCURRENCY) as executor:
+            for page_items in executor.map(parse_ocr_page_task, page_tasks):
+                all_questions.extend(page_items)
+    except OCRProviderConfigurationError as exc:
+        logger.error("OCR provider configuration blocked parse for %s: %s", pdf_path, exc)
+        all_questions = []
+        fatal_error_code = exc.code
+        question_errors.append(str(exc))
+        question_errors.extend(exc.details)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("OCR parse failed for %s", pdf_path)
+        all_questions = []
+        fatal_error_code = "ocr_runtime_error"
+        question_errors.append(str(exc) or "扫描版 PDF OCR 解析失败")
 
     payload = build_structured_output(pdf_path, all_questions)
+    payload.setdefault("parse_stats", {})
+    payload["parse_stats"]["failed_questions"] = len(question_errors)
+    payload["parse_stats"]["question_errors"] = question_errors
+    append_ocr_metadata(
+        payload["parse_stats"],
+        attempted=True,
+        fatal_error_code=fatal_error_code,
+        fatal_error=question_errors[0] if question_errors else None,
+    )
     output_path = settings.parsed_questions_dir / f"{pdf_path.stem}.json"
     save_json(output_path, payload)
     return payload
@@ -119,6 +192,10 @@ def parse_pdf(pdf_path: Path, use_fallback: bool = True) -> dict[str, object]:
     payload["parse_stats"]["fallback_questions"] = len(fallback_question_numbers)
     payload["parse_stats"]["failed_questions"] = len(question_errors)
     payload["parse_stats"]["question_errors"] = question_errors
+    append_ocr_metadata(payload["parse_stats"], attempted=False)
+    if not merged and question_errors:
+        payload["parse_stats"]["fatal_error"] = question_errors[0]
+        logger.error("PDF parse produced no questions for %s: %s", pdf_path, " | ".join(question_errors))
     output_path = settings.parsed_questions_dir / f"{pdf_path.stem}.json"
     save_json(output_path, payload)
     return payload
