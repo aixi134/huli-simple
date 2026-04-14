@@ -457,6 +457,138 @@ def list_wrong_answer_history(
     return result
 
 
+def get_weakness_analysis(
+    db: Session,
+    source_file: str | None = None,
+    *,
+    scope_type: str = "all",
+) -> dict[str, object]:
+    backfill_uploaded_files(db)
+    question_scope_stmt = build_scope_question_stmt(db, source_file=source_file, scope_type=scope_type)
+    if question_scope_stmt is None:
+        return {
+            "wrong_attempt_count": 0,
+            "wrong_question_count": 0,
+            "top_subjects": [],
+            "top_confusion_pairs": [],
+            "repeated_wrong_questions": [],
+            "sample_questions": [],
+        }
+
+    scoped_question_ids = select(question_scope_stmt.subquery().c.id)
+    attempts = db.scalars(
+        select(AnswerAttempt)
+        .options(
+            selectinload(AnswerAttempt.question).selectinload(Question.options),
+            selectinload(AnswerAttempt.question).selectinload(Question.user_state),
+        )
+        .where(AnswerAttempt.is_correct.is_(False))
+        .where(AnswerAttempt.question_id.in_(scoped_question_ids))
+        .order_by(AnswerAttempt.answered_at.desc())
+    ).all()
+
+    attempts = [
+        attempt
+        for attempt in attempts
+        if attempt.question is not None
+        and not (attempt.question.user_state and attempt.question.user_state.hidden_from_wrong_history)
+    ]
+
+    if not attempts:
+        return {
+            "wrong_attempt_count": 0,
+            "wrong_question_count": 0,
+            "top_subjects": [],
+            "top_confusion_pairs": [],
+            "repeated_wrong_questions": [],
+            "sample_questions": [],
+        }
+
+    file_name_map = {
+        item[0]: item[1]
+        for item in db.execute(select(UploadedFile.source_file, UploadedFile.file_name)).all()
+    }
+
+    subject_counts: dict[str, int] = {}
+    subject_question_ids: dict[str, set[str]] = {}
+    confusion_pair_counts: dict[tuple[str, str], int] = {}
+    question_wrong_counts: dict[str, int] = {}
+    latest_attempt_by_question_id: dict[str, AnswerAttempt] = {}
+    wrong_question_ids: set[str] = set()
+
+    for attempt in attempts:
+        question = attempt.question
+        if question is None:
+            continue
+        wrong_question_ids.add(attempt.question_id)
+        subject_label = (question.subject or "未分类").strip() or "未分类"
+        subject_counts[subject_label] = subject_counts.get(subject_label, 0) + 1
+        subject_question_ids.setdefault(subject_label, set()).add(attempt.question_id)
+        pair_key = (attempt.selected_answer, attempt.correct_answer)
+        confusion_pair_counts[pair_key] = confusion_pair_counts.get(pair_key, 0) + 1
+        question_wrong_counts[attempt.question_id] = question_wrong_counts.get(attempt.question_id, 0) + 1
+        latest_attempt_by_question_id.setdefault(attempt.question_id, attempt)
+
+    def build_question_item(attempt: AnswerAttempt) -> dict[str, object]:
+        question = attempt.question
+        if question is None:
+            return {}
+        state = question.user_state
+        return {
+            "attempt_id": attempt.id,
+            "question_id": attempt.question_id,
+            "source_file": attempt.source_file,
+            "file_name": display_file_name(attempt.source_file, file_name_map),
+            "question_number": question.question_number,
+            "stem": question.stem,
+            "subject": question.subject,
+            "year": question.year,
+            "selected_answer": attempt.selected_answer,
+            "correct_answer": attempt.correct_answer,
+            "answered_at": attempt.answered_at,
+            "options": [{"label": option.label, "content": option.content} for option in question.options],
+            "explanation": question.explanation,
+            "attempt_count": get_question_attempt_count(db, question.id),
+            "is_favorite": bool(state.is_favorite) if state else False,
+            "hidden_from_wrong_history": bool(state.hidden_from_wrong_history) if state else False,
+            "wrong_count": question_wrong_counts.get(attempt.question_id, 0),
+        }
+
+    ranked_attempts = sorted(
+        latest_attempt_by_question_id.values(),
+        key=lambda attempt: (
+            -question_wrong_counts.get(attempt.question_id, 0),
+            -(attempt.answered_at.timestamp() if attempt.answered_at else 0),
+        ),
+    )
+
+    return {
+        "wrong_attempt_count": len(attempts),
+        "wrong_question_count": len(wrong_question_ids),
+        "top_subjects": [
+            {
+                "label": label,
+                "wrong_count": count,
+                "question_count": len(subject_question_ids.get(label, set())),
+            }
+            for label, count in sorted(subject_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ],
+        "top_confusion_pairs": [
+            {
+                "selected_answer": selected_answer,
+                "correct_answer": correct_answer,
+                "wrong_count": count,
+            }
+            for (selected_answer, correct_answer), count in sorted(
+                confusion_pair_counts.items(),
+                key=lambda item: (-item[1], item[0][0], item[0][1]),
+            )[:5]
+        ],
+        "repeated_wrong_questions": [build_question_item(attempt) for attempt in ranked_attempts[:5]],
+        "sample_questions": [build_question_item(attempt) for attempt in ranked_attempts[:3]],
+    }
+
+
 def list_practice_record_buckets(db: Session, source_file: str | None = None) -> list[dict[str, object]]:
     backfill_uploaded_files(db)
     stmt = (

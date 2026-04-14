@@ -88,6 +88,28 @@ export function fetchPracticeRecords(sourceFile = 'all') {
   return request(`/history/practice-records${query}`)
 }
 
+export function fetchWeaknessAnalysis({ scopeType = 'all', sourceFile = 'all' } = {}) {
+  const params = new URLSearchParams()
+  params.set('scope_type', scopeType)
+  if (scopeType === 'source_file' && sourceFile && sourceFile !== 'all') {
+    params.set('source_file', sourceFile)
+  }
+  const query = params.toString() ? `?${params.toString()}` : ''
+  return request(`/analysis/weakness${query}`)
+}
+
+export function fetchWeaknessRecommendation({ scopeType = 'all', sourceFile = 'all' } = {}) {
+  const params = new URLSearchParams()
+  params.set('scope_type', scopeType)
+  if (scopeType === 'source_file' && sourceFile && sourceFile !== 'all') {
+    params.set('source_file', sourceFile)
+  }
+  const query = params.toString() ? `?${params.toString()}` : ''
+  return request(`/analysis/weakness/recommendation${query}`, {
+    method: 'POST',
+  })
+}
+
 export function importPdfs(files, { onProgress } = {}) {
   const formData = new FormData()
   files.forEach((file) => {

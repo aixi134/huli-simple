@@ -7,6 +7,8 @@ import {
   fetchRandomQuestion,
   fetchScopeStats,
   fetchUploadedFiles,
+  fetchWeaknessAnalysis,
+  fetchWeaknessRecommendation,
   fetchWrongAnswerHistory,
   importPdfs,
   streamAIExplanation,
@@ -75,6 +77,17 @@ function getScopeQuery(scopeType, sourceFile) {
   return { scopeType: 'all' }
 }
 
+function createEmptyWeaknessAnalysis() {
+  return {
+    wrong_attempt_count: 0,
+    wrong_question_count: 0,
+    top_subjects: [],
+    top_confusion_pairs: [],
+    repeated_wrong_questions: [],
+    sample_questions: [],
+  }
+}
+
 export default function App() {
   const [question, setQuestion] = useState(null)
   const [selectedAnswer, setSelectedAnswer] = useState('')
@@ -102,6 +115,10 @@ export default function App() {
   const [historyAILoadingId, setHistoryAILoadingId] = useState('')
   const [recordBuckets, setRecordBuckets] = useState([])
   const [loadingRecords, setLoadingRecords] = useState(true)
+  const [weaknessAnalysis, setWeaknessAnalysis] = useState(createEmptyWeaknessAnalysis())
+  const [loadingWeaknessAnalysis, setLoadingWeaknessAnalysis] = useState(true)
+  const [weaknessRecommendation, setWeaknessRecommendation] = useState(null)
+  const [loadingWeaknessRecommendation, setLoadingWeaknessRecommendation] = useState(false)
   const [scopeStats, setScopeStats] = useState({ total_count: 0, completed_count: 0, remaining_count: 0 })
   const [loadingScopeStats, setLoadingScopeStats] = useState(true)
   const [deletingQuestion, setDeletingQuestion] = useState(false)
@@ -190,6 +207,17 @@ export default function App() {
       setRecordBuckets(records)
     } finally {
       setLoadingRecords(false)
+    }
+  }
+
+  async function refreshWeaknessAnalysis(scope = currentScopeQuery) {
+    setLoadingWeaknessAnalysis(true)
+    setWeaknessRecommendation(null)
+    try {
+      const analysis = await fetchWeaknessAnalysis(scope)
+      setWeaknessAnalysis(analysis)
+    } finally {
+      setLoadingWeaknessAnalysis(false)
     }
   }
 
@@ -307,6 +335,7 @@ export default function App() {
     }
     refreshWrongHistory(selectedSourceFile, historyTab).catch((err) => setError(err.message))
     refreshPracticeRecords(recordsSourceFile).catch((err) => setError(err.message))
+    refreshWeaknessAnalysis(currentScopeQuery).catch((err) => setError(err.message))
     refreshScopeStats(currentScopeQuery).catch((err) => setError(err.message))
   }, [initialized, selectedSourceFile, historyTab, scopeType])
 
@@ -322,6 +351,7 @@ export default function App() {
       const data = await submitAnswer(question.id, answerToSubmit)
       setQuestion((current) => (current ? { ...current, attempt_count: data.attempt_count } : current))
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshWeaknessAnalysis(currentScopeQuery)
       await refreshScopeStats(currentScopeQuery)
       if (data.correct) {
         await handleNextQuestion()
@@ -399,6 +429,7 @@ export default function App() {
       await refreshUploadedFiles()
       await refreshWrongHistory(selectedSourceFile, historyTab)
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshWeaknessAnalysis(currentScopeQuery)
       await refreshScopeStats(currentScopeQuery)
       if (!question) {
         await loadQuestion(currentScopeQuery)
@@ -460,6 +491,7 @@ export default function App() {
       await refreshUploadedFiles()
       await refreshWrongHistory(nextSourceFile, historyTab)
       await refreshPracticeRecords(nextScopeType === 'source_file' ? nextSourceFile : 'all')
+      await refreshWeaknessAnalysis(nextScopeQuery)
       await refreshScopeStats(nextScopeQuery)
       if (currentQuestionDeleted || nextHistory.length === 0 || scopeType !== nextScopeType || selectedSourceFile !== nextSourceFile) {
         await loadQuestion(nextScopeQuery, { resetHistory: true })
@@ -533,6 +565,7 @@ export default function App() {
       await refreshUploadedFiles()
       await refreshWrongHistory(selectedSourceFile, historyTab)
       await refreshPracticeRecords(recordsSourceFile)
+      await refreshWeaknessAnalysis(currentScopeQuery)
       await refreshScopeStats(currentScopeQuery)
       await loadQuestion(currentScopeQuery, { resetHistory: true })
     } catch (err) {
@@ -626,6 +659,20 @@ export default function App() {
     )
   }
 
+  async function handleGenerateWeaknessRecommendation() {
+    setLoadingWeaknessRecommendation(true)
+    setWeaknessRecommendation(null)
+    setError('')
+    try {
+      const recommendation = await fetchWeaknessRecommendation(currentScopeQuery)
+      setWeaknessRecommendation(recommendation)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoadingWeaknessRecommendation(false)
+    }
+  }
+
   function renderScopeSummary() {
     if (scopeType === 'source_file' && selectedFileInfo) {
       return (
@@ -678,6 +725,9 @@ export default function App() {
               </button>
               <button type="button" className={`tab-button ${activeView === 'records' ? 'active' : ''}`} onClick={() => setActiveView('records')}>
                 练习记录
+              </button>
+              <button type="button" className={`tab-button ${activeView === 'analysis' ? 'active' : ''}`} onClick={() => setActiveView('analysis')}>
+                薄弱点分析
               </button>
             </div>
             <button type="button" className="secondary-button" onClick={() => handleNextQuestion()} disabled={loadingQuestion || submitting}>
@@ -1060,7 +1110,9 @@ export default function App() {
               <p className="empty-text">{historyTab === 'wrong' ? '当前范围下还没有错题。' : '当前范围下还没有收藏题。'}</p>
             )}
           </section>
-        ) : (
+        ) : null}
+
+        {activeView === 'records' ? (
           <section className="card">
             <div className="section-header history-header">
               <div>
@@ -1099,7 +1151,152 @@ export default function App() {
               <p className="empty-text">还没有练习记录。</p>
             )}
           </section>
-        )}
+        ) : null}
+
+        {activeView === 'analysis' ? (
+          <section className="card">
+            <div className="section-header history-header">
+              <div>
+                <h2>薄弱点分析</h2>
+                <span className="section-subtitle">基于当前范围内的错题记录和错误选项模式生成专项建议</span>
+                {loadingWeaknessAnalysis ? (
+                  <span className="section-subtitle">分析中...</span>
+                ) : (
+                  <div className="summary-badge-row">
+                    <span className="mini-badge failed">错误次数 {weaknessAnalysis.wrong_attempt_count || 0}</span>
+                    <span className="mini-badge muted">错题数量 {weaknessAnalysis.wrong_question_count || 0}</span>
+                  </div>
+                )}
+              </div>
+              <div className="analysis-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => refreshWeaknessAnalysis(currentScopeQuery).catch((err) => setError(err.message))}
+                  disabled={loadingWeaknessAnalysis}
+                >
+                  {loadingWeaknessAnalysis ? '分析中...' : '刷新分析'}
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={handleGenerateWeaknessRecommendation}
+                  disabled={loadingWeaknessRecommendation || loadingWeaknessAnalysis || !weaknessAnalysis.wrong_attempt_count}
+                >
+                  {loadingWeaknessRecommendation ? 'AI 生成中...' : '生成 AI 学习建议'}
+                </button>
+              </div>
+            </div>
+
+            {!loadingWeaknessAnalysis && !weaknessAnalysis.wrong_attempt_count ? (
+              <p className="empty-text">当前范围下还没有错题，先做题后再来查看薄弱点分析。</p>
+            ) : null}
+
+            {weaknessAnalysis.top_subjects?.length ? (
+              <div className="analysis-grid">
+                <div className="analysis-panel">
+                  <h3>高频薄弱主题</h3>
+                  <div className="analysis-list">
+                    {weaknessAnalysis.top_subjects.map((item) => (
+                      <div key={item.label} className="analysis-list-item">
+                        <strong>{item.label}</strong>
+                        <span>错误 {item.wrong_count} 次 · 涉及 {item.question_count} 题</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="analysis-panel">
+                  <h3>高频误选模式</h3>
+                  <div className="analysis-list">
+                    {weaknessAnalysis.top_confusion_pairs?.length ? weaknessAnalysis.top_confusion_pairs.map((item) => (
+                      <div key={`${item.selected_answer}-${item.correct_answer}`} className="analysis-list-item">
+                        <strong>{item.selected_answer} → {item.correct_answer}</strong>
+                        <span>出现 {item.wrong_count} 次</span>
+                      </div>
+                    )) : <p className="empty-text">暂未发现明显的固定误选模式。</p>}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {weaknessAnalysis.repeated_wrong_questions?.length ? (
+              <div className="analysis-panel">
+                <h3>代表性错题</h3>
+                <div className="analysis-list">
+                  {weaknessAnalysis.repeated_wrong_questions.map((item) => (
+                    <div key={item.question_id} className="analysis-question-card">
+                      <div className="history-title-row">
+                        <strong>第 {item.question_number} 题</strong>
+                        <span className="history-file-name">{item.file_name}</span>
+                        <span className="mini-badge failed">错 {item.wrong_count || 0} 次</span>
+                      </div>
+                      <p className="history-preview expanded">{item.stem}</p>
+                      <p className="history-meta">
+                        你的答案 {item.selected_answer} · 正确答案 {item.correct_answer}
+                        {item.subject ? ` · ${item.subject}` : ''}
+                        {item.year ? ` · ${item.year}` : ''}
+                      </p>
+                      <p className="history-meta">解析：{item.explanation || '暂无解析'}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {weaknessRecommendation || loadingWeaknessRecommendation ? (
+              <div className="ai-box markdown-body analysis-ai-box">
+                <strong>AI 学习建议</strong>
+                {loadingWeaknessRecommendation ? (
+                  <p>AI 正在根据你的错题模式生成专项学习建议，请稍候...</p>
+                ) : (
+                  <>
+                    {weaknessRecommendation?.summary ? <p>{weaknessRecommendation.summary}</p> : null}
+                    {weaknessRecommendation?.weak_points?.length ? (
+                      <>
+                        <h3>重点薄弱点</h3>
+                        <ul>
+                          {weaknessRecommendation.weak_points.map((item, index) => (
+                            <li key={`${item.title}-${index}`}>
+                              <strong>{item.title}</strong>（{item.priority}）- {item.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {weaknessRecommendation?.confusion_advice?.length ? (
+                      <>
+                        <h3>误选纠偏建议</h3>
+                        <ul>
+                          {weaknessRecommendation.confusion_advice.map((item, index) => (
+                            <li key={`${item.pattern}-${index}`}>
+                              <strong>{item.pattern}</strong>：{item.reason}；建议：{item.advice}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : null}
+                    {weaknessRecommendation?.study_plan?.length ? (
+                      <>
+                        <h3>专项学习步骤</h3>
+                        <ol>
+                          {weaknessRecommendation.study_plan.map((item) => (
+                            <li key={`${item.step}-${item.action}`}>
+                              <strong>{item.action}</strong>：{item.goal}
+                            </li>
+                          ))}
+                        </ol>
+                      </>
+                    ) : null}
+                    {weaknessRecommendation?.next_action ? (
+                      <p><strong>下一步：</strong>{weaknessRecommendation.next_action}</p>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
       </div>
     </main>
   )

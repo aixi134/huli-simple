@@ -12,6 +12,7 @@ from backend.app.config import settings
 from backend.app.db import get_db, init_db
 from backend.app.services.explainer import explain_with_gemma, stream_explanation_with_gemma
 from backend.app.services.importer import import_uploaded_pdf, import_uploaded_pdfs
+from backend.app.services.weakness_analysis import recommend_weakness_study_plan
 
 
 LLM_MISSING_KEY_MESSAGE = "未设置 QUIZ_LLM_API_KEY 或 OPENAI_API_KEY，无法生成 AI 解析"
@@ -181,6 +182,35 @@ def practice_records(
         schemas.PracticeRecordBucketOut(**item)
         for item in crud.list_practice_record_buckets(db, normalized_source)
     ]
+
+
+@app.get("/analysis/weakness", response_model=schemas.WeaknessAnalysisOut)
+def weakness_analysis(
+    source_file: str | None = Query(default=None),
+    scope_type: Literal["all", "source_file", "wrong_only"] = Query(default="all"),
+    db: Session = Depends(get_db),
+) -> schemas.WeaknessAnalysisOut:
+    normalized_source = None if not source_file or source_file == "all" else source_file
+    return schemas.WeaknessAnalysisOut(**crud.get_weakness_analysis(db, source_file=normalized_source, scope_type=scope_type))
+
+
+@app.post("/analysis/weakness/recommendation", response_model=schemas.WeaknessRecommendationOut)
+def weakness_recommendation(
+    source_file: str | None = Query(default=None),
+    scope_type: Literal["all", "source_file", "wrong_only"] = Query(default="all"),
+    db: Session = Depends(get_db),
+) -> schemas.WeaknessRecommendationOut:
+    if not settings.llm_api_key:
+        raise HTTPException(status_code=400, detail=LLM_MISSING_KEY_MESSAGE)
+    normalized_source = None if not source_file or source_file == "all" else source_file
+    analysis = crud.get_weakness_analysis(db, source_file=normalized_source, scope_type=scope_type)
+    if int(analysis.get("wrong_attempt_count", 0)) <= 0:
+        raise HTTPException(status_code=400, detail="当前范围下还没有错题，暂时无法生成薄弱点分析")
+    try:
+        recommendation = recommend_weakness_study_plan(analysis)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.WeaknessRecommendationOut(**recommendation)
 
 
 @app.patch("/question/{question_id}/wrong-state", response_model=schemas.QuestionUserStateOut)

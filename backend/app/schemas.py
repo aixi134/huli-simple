@@ -104,6 +104,57 @@ class WrongAnswerHistoryItemOut(BaseModel):
     hidden_from_wrong_history: bool = False
 
 
+class WeaknessSubjectOut(BaseModel):
+    label: str
+    wrong_count: int = 0
+    question_count: int = 0
+
+
+class WeaknessConfusionPairOut(BaseModel):
+    selected_answer: str
+    correct_answer: str
+    wrong_count: int = 0
+
+
+class WeaknessQuestionSampleOut(WrongAnswerHistoryItemOut):
+    wrong_count: int = 0
+
+
+class WeaknessAnalysisOut(BaseModel):
+    wrong_attempt_count: int = 0
+    wrong_question_count: int = 0
+    top_subjects: list[WeaknessSubjectOut] = Field(default_factory=list)
+    top_confusion_pairs: list[WeaknessConfusionPairOut] = Field(default_factory=list)
+    repeated_wrong_questions: list[WeaknessQuestionSampleOut] = Field(default_factory=list)
+    sample_questions: list[WeaknessQuestionSampleOut] = Field(default_factory=list)
+
+
+class WeakPointOut(BaseModel):
+    title: str
+    reason: str
+    priority: str = "medium"
+
+
+class ConfusionAdviceOut(BaseModel):
+    pattern: str
+    reason: str
+    advice: str
+
+
+class StudyPlanStepOut(BaseModel):
+    step: int
+    action: str
+    goal: str
+
+
+class WeaknessRecommendationOut(BaseModel):
+    summary: str = ""
+    weak_points: list[WeakPointOut] = Field(default_factory=list)
+    confusion_advice: list[ConfusionAdviceOut] = Field(default_factory=list)
+    study_plan: list[StudyPlanStepOut] = Field(default_factory=list)
+    next_action: str = ""
+
+
 class QuestionUserStateUpdateIn(BaseModel):
     is_favorite: bool | None = None
     hidden_from_wrong_history: bool | None = None
